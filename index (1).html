@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Anmeldung – ELKI Verein Trimmis</title>
+<!--
+  ============================================================
+  EXTERNE ANMELDE-SEITE  (Schnittstelle zum Benutzerverwaltungs-Tool)
+  ------------------------------------------------------------
+  - Schreibt jede Anmeldung als EIGENES Dokument in die
+    Firestore-Sammlung "anmeldungen" mit status: "pending".
+  - Slot-IDs (sp_Mo_VM ...) sind identisch zum Tool, damit die
+    Anmeldung später direkt zu einem Kind freigegeben werden kann.
+  - Design/Layout ist bewusst minimal – nur die Funktion zählt.
+
+  WICHTIG: Firestore-Sicherheitsregeln (Firebase Console →
+  Firestore Database → Regeln) müssen öffentliches Anlegen in
+  "anmeldungen" erlauben. Siehe Block am Ende dieser Datei.
+  ============================================================
+-->
+<style>
+  :root { --brand:#1F5BB5; --line:#D8DEE8; --ink:#1F2937; --ink-3:#6B7280; --bg:#F4F6FA; }
+  * { box-sizing:border-box; }
+  body { font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--ink); margin:0; padding:24px; }
+  .card { max-width:560px; margin:0 auto; background:#fff; border:1px solid var(--line); border-radius:12px; padding:24px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--ink-3); font-size:14px; margin:0 0 20px; }
+  label { display:block; font-size:13px; font-weight:600; margin:14px 0 4px; }
+  input[type=text], input[type=date], input[type=tel], input[type=email], select, textarea {
+    width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:8px; font-size:14px; font-family:inherit; }
+  select { background:#fff; color:var(--ink); cursor:pointer; }
+  textarea { min-height:70px; resize:vertical; }
+  fieldset { border:1px solid var(--line); border-radius:8px; margin:14px 0 0; padding:10px 12px; }
+  legend { font-size:13px; font-weight:700; padding:0 6px; }
+  .slot { display:flex; align-items:center; gap:8px; font-weight:400; font-size:14px; margin:4px 0; }
+  .slot input { width:auto; }
+  button { margin-top:20px; width:100%; padding:12px; background:var(--brand); color:#fff; border:0; border-radius:8px; font-size:15px; font-weight:700; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:default; }
+  .msg { margin-top:16px; padding:12px; border-radius:8px; font-size:14px; display:none; }
+  .msg.ok  { background:#E7F4ED; color:#1B6B43; display:block; }
+  .msg.err { background:#FCE8E8; color:#B42318; display:block; }
+  .hp { position:absolute; left:-9999px; top:-9999px; }
+  .req { color:#B42318; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Anmeldung ELKI Verein Trimmis</h1>
+    <p class="sub">Bitte fülle das Formular aus. Deine Anmeldung wird vom Verein geprüft und anschliessend bestätigt.</p>
+
+    <form id="anmelde-form">
+      <label>Vorname des Kindes <span class="req">*</span></label>
+      <input type="text" id="vorname" required>
+
+      <label>Nachname des Kindes <span class="req">*</span></label>
+      <input type="text" id="nachname" required>
+
+      <label>Geburtsdatum</label>
+      <input type="date" id="geburtsdatum">
+
+      <label>Telefon (Eltern)</label>
+      <input type="tel" id="telefon">
+
+      <label>E-Mail (Eltern)</label>
+      <input type="email" id="email">
+
+      <label>Schuljahr <span class="req">*</span></label>
+      <select id="schuljahr" required></select>
+
+      <div id="angebote"></div>
+
+      <label>Bemerkung</label>
+      <textarea id="notiz" placeholder="z.B. Allergien, Wünsche ..."></textarea>
+
+      <!-- Spam-Schutz: für Menschen unsichtbar, nicht ausfüllen -->
+      <input type="text" id="website" class="hp" tabindex="-1" autocomplete="off">
+
+      <button type="submit" id="submit-btn">Anmeldung absenden</button>
+      <div class="msg" id="msg"></div>
+    </form>
+  </div>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getFirestore, collection, addDoc, serverTimestamp, doc, getDoc }
+    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+  // Gleiche Firebase-Konfiguration wie das Tool (öffentlich – Schutz via Security-Rules)
+  const firebaseConfig = {
+    apiKey:            "AIzaSyDNknCH6Q2mquS2vrKG_gYj1tBYgtkd374",
+    authDomain:        "elki-verien-benutzerverwaltung.firebaseapp.com",
+    projectId:         "elki-verien-benutzerverwaltung",
+    storageBucket:     "elki-verien-benutzerverwaltung.firebasestorage.app",
+    messagingSenderId: "336282417580",
+    appId:             "1:336282417580:web:aff3d7b67e125e12296209"
+  };
+  const app = initializeApp(firebaseConfig);
+  const db  = getFirestore(app);
+
+  // Angebote/Slots – IDs identisch zum Benutzerverwaltungs-Tool
+  const ANGEBOTE = {
+    spielgruppe: { label:'Spielgruppe Luftballon', slots:[
+      { id:'sp_Mo_VM', label:'Mo Vormittag (08:30–11:30)' },
+      { id:'sp_Di_VM', label:'Di Vormittag (08:30–11:30)' },
+      { id:'sp_Di_NM', label:'Di Nachmittag (13:30–17:30)' },
+      { id:'sp_Mi_VM', label:'Mi Vormittag (08:30–11:30)' },
+      { id:'sp_Do_VM', label:'Do Vormittag (08:30–11:30)' },
+      { id:'sp_Fr_VM', label:'Fr Vormittag (08:30–11:30)' },
+    ]},
+    waldspielgruppe: { label:'Waldspielgruppe Sonnenstrahl', slots:[
+      { id:'ws_Mo_NM', label:'Mo Nachmittag (13:30–16:00)' },
+    ]},
+    mittagstisch: { label:'Mittagstisch', slots:[
+      { id:'mt_Mo', label:'Mo (11:45–13:30)' },
+      { id:'mt_Di', label:'Di (11:45–13:30)' },
+      { id:'mt_Do', label:'Do (11:45–13:30)' },
+      { id:'mt_Fr', label:'Fr (11:45–13:30)' },
+    ]},
+  };
+
+  // ── Schuljahr-Auswahl – verknüpft mit den Zeitachsen im Verwaltungs-Tool ──
+  // Das Tool speichert die Schuljahre in Firestore unter config/schuljahre ({value:[...]})
+  // und das aktuell gewählte Jahr unter config/aktSchuljahr ({value:'2025/26'}).
+  // Diese Seite liest GENAU diese Werte, damit Anmeldung und Tool dieselben Jahre nutzen.
+  const schuljahrSelect = document.getElementById('schuljahr');
+  schuljahrSelect.innerHTML = '<option value="" disabled selected>Lädt …</option>';
+  schuljahrSelect.disabled = true;
+
+  // Format wie im Tool ('2025/26'); dient als Fallback, falls config/schuljahre (noch) nicht lesbar ist.
+  function makeSchoolYear(startY) {
+    return `${startY}/${String((startY + 1) % 100).padStart(2, '0')}`;
+  }
+  function defaultSchoolYear(d = new Date()) {
+    const y = d.getFullYear();
+    const startY = d.getMonth() >= 7 ? y : y - 1; // Monat 7 = August
+    return makeSchoolYear(startY);
+  }
+  // Sortierung identisch zum Tool: nach Startjahr aufsteigend, ohne Duplikate.
+  function sortSchoolYears(arr) {
+    return [...new Set(arr)].sort((a, b) => (parseInt(a) || 0) - (parseInt(b) || 0));
+  }
+
+  async function ladeSchuljahre() {
+    let liste = null, aktuell = null;
+    try {
+      const snapListe = await getDoc(doc(db, 'config/schuljahre'));
+      if (snapListe.exists() && Array.isArray(snapListe.data().value)) liste = snapListe.data().value;
+      const snapAkt = await getDoc(doc(db, 'config/aktSchuljahr'));
+      if (snapAkt.exists()) aktuell = snapAkt.data().value;
+    } catch (e) {
+      console.warn('Schuljahre konnten nicht aus dem Tool geladen werden – nutze Fallback.', e);
+    }
+    // Fallback: laufendes + 2 Planungsjahre selbst erzeugen, wenn das Tool (noch) nichts liefert.
+    if (!liste || !liste.length) {
+      const baseStartYear = parseInt(defaultSchoolYear(), 10);
+      liste = [0, 1, 2].map(off => makeSchoolYear(baseStartYear + off));
+    }
+    liste = sortSchoolYears(liste);
+    if (!aktuell || !liste.includes(aktuell)) {
+      aktuell = liste.includes(defaultSchoolYear()) ? defaultSchoolYear() : liste[liste.length - 1];
+    }
+    schuljahrSelect.innerHTML = liste.map(sj =>
+      `<option value="${sj}"${sj === aktuell ? ' selected' : ''}>${sj}${sj === aktuell ? ' (aktuelles Schuljahr)' : ''}</option>`
+    ).join('');
+    schuljahrSelect.disabled = false;
+  }
+  ladeSchuljahre();
+
+  // Checkbox-Liste je Angebot aufbauen
+  document.getElementById('angebote').innerHTML = Object.values(ANGEBOTE).map(g => `
+    <fieldset>
+      <legend>${g.label}</legend>
+      ${g.slots.map(s => `
+        <label class="slot"><input type="checkbox" name="slot" value="${s.id}"> ${s.label}</label>
+      `).join('')}
+    </fieldset>
+  `).join('');
+
+  const form = document.getElementById('anmelde-form');
+  const btn  = document.getElementById('submit-btn');
+  const msg  = document.getElementById('msg');
+
+  function showMsg(text, ok) {
+    msg.textContent = text;
+    msg.className = 'msg ' + (ok ? 'ok' : 'err');
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    // Spam-Honeypot: wenn ausgefüllt → still abbrechen
+    if (document.getElementById('website').value.trim() !== '') return;
+
+    const vorname  = document.getElementById('vorname').value.trim();
+    const nachname = document.getElementById('nachname').value.trim();
+    if (!vorname || !nachname) { showMsg('Bitte Vorname und Nachname ausfüllen.', false); return; }
+
+    const schuljahr = document.getElementById('schuljahr').value;
+    if (!schuljahr) { showMsg('Bitte ein Schuljahr auswählen.', false); return; }
+
+    const slots = [...document.querySelectorAll('input[name="slot"]:checked')].map(c => c.value);
+
+    btn.disabled = true;
+    btn.textContent = 'Wird gesendet …';
+    try {
+      await addDoc(collection(db, 'anmeldungen'), {
+        vorname,
+        nachname,
+        geburtsdatum: document.getElementById('geburtsdatum').value || '',
+        telefon:      document.getElementById('telefon').value.trim(),
+        email:        document.getElementById('email').value.trim(),
+        notiz:        document.getElementById('notiz').value.trim(),
+        slots,
+        schuljahr,                        // gewähltes Schuljahr, Format wie Tool ('2025/26')
+        status:       'pending',          // Kennzeichnung "zu prüfen"
+        eingereichtAm: serverTimestamp()
+      });
+      form.reset();
+      showMsg('Danke! Deine Anmeldung wurde übermittelt und wird vom Verein geprüft.', true);
+    } catch (err) {
+      console.error('Anmeldung fehlgeschlagen', err);
+      showMsg('Senden fehlgeschlagen: ' + err.message, false);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Anmeldung absenden';
+    }
+  });
+</script>
+
+<!--
+  ============================================================
+  FIRESTORE-SICHERHEITSREGELN (in der Firebase Console einfügen)
+  ------------------------------------------------------------
+  Diesen Block INNERHALB von
+    match /databases/{database}/documents { ... }
+  zu deinen bestehenden Regeln hinzufügen:
+
+    // Öffentliche Anmeldungen: jeder darf NEU anlegen,
+    // aber nur eingeloggte Vereinsleute dürfen lesen/bearbeiten/löschen.
+    match /anmeldungen/{id} {
+      allow create: if request.resource.data.status == 'pending'
+                    && request.resource.data.vorname is string
+                    && request.resource.data.nachname is string
+                    && request.resource.data.vorname.size() < 100
+                    && request.resource.data.nachname.size() < 100;
+      allow read, update, delete: if request.auth != null;
+    }
+
+    // Schuljahre/Zeitachsen: NUR diese beiden Dokumente öffentlich LESBAR,
+    // damit das Anmelde-Dropdown dieselben Jahre wie das Tool anbietet.
+    // Schreiben weiterhin nur für eingeloggte Vereinsleute.
+    // WICHTIG: gezielt nur diese zwei Dokumente – NICHT ganz config/** freigeben
+    // (dort liegt z.B. config/users mit Benutzerdaten).
+    match /config/schuljahre {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+    match /config/aktSchuljahr {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+  Deine bestehenden Regeln für data/** und das übrige config/** (nur eingeloggt)
+  bleiben unverändert bestehen. Falls du bisher eine Sammel-Regel wie
+    match /config/{doc} { allow read, write: if request.auth != null; }
+  hast: die beiden match-Blöcke oben sind spezifischer und ergänzen sie (Firestore
+  gewährt Lesezugriff, sobald EINE Regel zutrifft) – du musst dort nichts löschen.
+  ============================================================
+-->
+</body>
+</html>
